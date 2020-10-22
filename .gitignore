@@ -1,23 +1,4 @@
-## Awestruct
-_tmp
 _site
-_antora_cache
 .sass-cache
-stylesheets/_config-variables.less
-.awestruct
-
-## OS related
-*.DS_Store
-
-## IDE
-.settings
-.project
-.buildpath
-.idea
-*.iml
-
-## Ruby and Rake tools
-.rvmrc
-.bundle
-_bin
-vendor
+.jekyll-metadata
+.DS_Store
