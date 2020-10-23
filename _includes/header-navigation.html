@@ -18,12 +18,10 @@
           <a href="{{site.baseurl}}/documentation/" class="{% if page.url contains '/documentation/' %}active{% endif %}">Documentation</a>
         </li>
         <li>
-          <a href="{{site.baseurl}}/release/" class="{% if page.url contains '/release/' %}active{% endif %}">Release</a>
+          <a href="{{site.baseurl}}/releases/" class="{% if page.url contains '/releases/' %}active{% endif %}">Releases</a>
         </li>
         <li>
-          {% for latestVersion in site.data.downloads.latest_version %}
-            <a href="{{site.baseurl}}/docs/{{ latestVersion.version_shortname }}/" class="{% if page.url contains '/docs/' %}active{% endif %}">Community</a>
-          {% endfor %}
+            <a href="{{site.baseurl}}/community/" class="{% if page.url contains '/community/' %}active{% endif %}">Community</a>
         </li>
         <li>
           <a href="{{site.baseurl}}/blog/" class="{% if page.url contains '/blog/' %}active{% endif %}">Blog</a>
