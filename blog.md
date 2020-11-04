@@ -1,0 +1,7 @@
+---
+layout: blog
+title: Debezium Blog
+permalink: /blog/
+pagination: 
+  enabled: true
+---
