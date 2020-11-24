@@ -1,5 +1,9 @@
-= Frequently Asked Questions
-:awestruct-layout: doc
+---
+layout: page-menu
+title: Frequently Asked Questions
+permalink: /documentation/faq
+---
+
 :linkattrs:
 :icons: font
 :toc:

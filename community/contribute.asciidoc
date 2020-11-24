@@ -1,9 +1,12 @@
-= Contribute to Debezium
-:awestruct-layout: doc
+---
+layout: page-menu
+title: Contribute to Debezium
+permalink: /community/contribute
+---
 :linkattrs:
 :icons: font
 
-We're an active open source software community. We welcome and value contributions from everyone, and have adopted a link:/docs/code-of-conduct/[code of conduct] for our community.
+We're an active open source software community. We welcome and value contributions from everyone, and have adopted a link:/community/code-of-conduct/[code of conduct] for our community.
 
 [[follow]]
 == Follow us

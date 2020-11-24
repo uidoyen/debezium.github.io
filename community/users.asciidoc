@@ -1,5 +1,8 @@
-= Who's Using Debezium?
-:awestruct-layout: doc
+---
+layout: page-menu
+title: Who's Using Debezium?
+permalink: /community/users
+---
 :linkattrs:
 :icons: font
 :source-highlighter: highlight.js

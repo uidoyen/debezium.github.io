@@ -1,5 +1,8 @@
-= Debezium Code of Conduct
-:awestruct-layout: doc
+---
+layout: page-menu
+title: Debezium Code of Conduct
+permalink: /community/code-of-conduct
+---
 :linkattrs:
 :icons: font
 

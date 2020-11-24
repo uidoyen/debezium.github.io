@@ -1,3 +1,5 @@
-= Debezium Release Series 0.10
-:awestruct-layout: releases
-:awestruct-debezium_version: "0.10"
+---
+layout: release-version
+title: Debezium Release Series 0.10
+debezium-version: "0.10"
+---
