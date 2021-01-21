@@ -61,7 +61,7 @@ end
 
 desc 'Build the site for the given environment: development (the default), staging, or production'
 task :build, [:environment] do |task, args|
-  args.with_defaults(:environment => 'production')
+  args.with_defaults(:environment => 'staging')
 
   run_antora
   system 'bundle install'
