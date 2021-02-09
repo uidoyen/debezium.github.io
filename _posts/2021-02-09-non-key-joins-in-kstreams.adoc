@@ -1,0 +1,288 @@
+---
+layout: post
+title: Understanding Non-Key Joins With the Quarkus Kafka Streams Extension
+date: 2021-02-09
+tags: [ kafka streams, quarkus, examples ]
+author: anmohant
+---
+
+https://kafka.apache.org/documentation/streams/[Kafka Streams] is a library for developing applications for processing records from topics in Apache Kafka.
+A Kafka Streams application processes record streams through a topology in real-time processing of data continuously, concurrently, and in a record-by-record manner.
+The Kafka Streams DSL provides a range of stream processing operations such as a map, filter, join, and aggregate.
+
+== Non-Key Joins in Kafka Streams
+
+https://kafka.apache.org[Apache Kafka] 2.4 introduced the foreign key join (https://cwiki.apache.org/confluence/display/KAFKA/KIP-213+Support+non-key+joining+in+KTable[KIP-213]) feature to close the gap between the semantics of KTables in streams and tables in relational databases.
+It makes relational data liberated by connection mechanisms far easier to use, smoothing a transition to natively-built event-driven services.
+This resolved the problem of out-of-order processing due to foreign key changes in tables.
+
+A join operation merges two or more input streams and/or tables based on the keys of their data records, and generates a distinct stream/table.
+The join operations available in the Kafka Streams DSL differ based on which kinds of streams or tables that are being joined; for example, KStream-KStream joins, KTable-KTable joins or KTable-KStream joins, etc.
+Joining streams often involves defining input streams that are read from Kafka topics, delivering transformations on the joined streams to produce results, and finally writing the results back to Kafka topics.
+
++++<!-- more -->+++
+
+Non-key joins or rather https://kafka.apache.org/27/documentation/streams/developer-guide/dsl-api.html#ktable-ktable-fk-join[foreign-key joins] are analogous to joins in SQL. For example:
+[source,sql]
+----
+SELECT * FROM CUSTOMER JOIN ADDRESS ON CUSTOMER.ID = ADDRESS.CUSTOMER_ID
+----
+The output of the join is a new KTable containing the join result.
+
+== Database Overview
+
+++++
+<div class="imageblock centered-image">
+    <img src="/assets/images/kstreams_db_diagram.jpg" class="responsive-image" alt="Database Overview">
+</div>
+++++
+
+The picture above shows the ER diagram of the database used in our application. We are going to focus on two entities:
+
+ - customer : the list of customers
+ - address : the list of addresses
+
+They share a foreign key relationship from address to customer i.e. a customer can have multiple addresses.
+
+Using Kafka Streams, the change event topics for both tables will be loaded into two KTables, which are joined on the customer id.
+The KStreams application is going to process data from the two Kafka topics. These topics receive CDC events based on the customers and addresses, each of which has its corresponding Jackson-annotated POJO (Customer and Address), enriched by a field holding the CDC event type (i.e. UPSERT/DELETE).
+Each insertion, update, or deletion of a record on either side will re-trigger the join.
+Debezium's CDC allows to it emits events for each table(s) on distinct topics, and consumers often are interested in a view of such aggregate spanning multiple tables as a single document.
+
+In this article, we are going to explore foreign key join using two Debezium change data topics joined via Kafka Streams and running the stream processing application using https://quarkus.io/guides/kafka-streams[Quarkus Kafka Streams Extension].
+
+== Creating an Application using Quarkus Kafka Streams Extension
+
+To create a new Quarkus project with this extension, run the following:
+----
+mvn io.quarkus:quarkus-maven-plugin:1.11.1.Final:create \
+    -DprojectGroupId=org.acme \
+    -DprojectArtifactId=kafka-streams-quickstart-aggregator \
+    -Dextensions="kafka-streams" \
+     && mv kafka-streams-quickstart-aggregator aggregator
+----
+
+=== Understanding Stream Processing Topology
+
+We have an aggregator that will read from the two Kafka topics and processes them in a streaming pipeline:
+
+ - the two topics are joined on customer id
+ - each customer is mapped with its addresses depending upon upsert/delete
+ - this aggregated data is written out to a third topic (customersWithAddressesTopic)
+
+When using the Quarkus extension for Kafka Streams all we need to do for that is to declare a CDI producer method.
+A CDI producer method must be always annotated with `@Produces`, and it must return a `Topology` instance.
+The Quarkus extension will take care of configuring, starting and stopping the actual Kafka Streams engine.
+Now let's take a look at the actual streaming query implementation itself.
+
+[source,java]
+----
+@ApplicationScoped
+public class TopologyProducer {
+
+    @ConfigProperty(name = "customers.topic") // <1>
+    String customersTopic;
+
+    @ConfigProperty(name = "addresses.topic")
+    String addressesTopic;
+
+    @ConfigProperty(name = "customers.with.addresses.topic")
+    String customersWithAddressesTopic;
+
+    @Produces
+    public Topology buildTopology() {
+        StreamsBuilder builder = new StreamsBuilder(); // <2>
+
+        Serde<Long> adressKeySerde = DebeziumSerdes.payloadJson(Long.class);
+        adressKeySerde.configure(Collections.emptyMap(), true);
+        Serde<Address> addressSerde = DebeziumSerdes.payloadJson(Address.class);
+        addressSerde.configure(Collections.singletonMap("from.field", "after"), false);
+
+        Serde<Integer> customersKeySerde = DebeziumSerdes.payloadJson(Integer.class);
+        customersKeySerde.configure(Collections.emptyMap(), true);
+        Serde<Customer> customersSerde = DebeziumSerdes.payloadJson(Customer.class);
+        customersSerde.configure(Collections.singletonMap("from.field", "after"), false);
+
+        JsonbSerde<AddressAndCustomer> addressAndCustomerSerde = new JsonbSerde<>(AddressAndCustomer.class); // <3>
+        JsonbSerde<CustomerWithAddresses> customerWithAddressesSerde = new JsonbSerde<>(CustomerWithAddresses.class);
+
+        KTable<Long, Address> addresses = builder.table( // <4>
+                addressesTopic,
+                Consumed.with(adressKeySerde, addressSerde)
+        );
+
+        KTable<Integer, Customer> customers = builder.table(
+                customersTopic,
+                Consumed.with(customersKeySerde, customersSerde)
+        );
+
+        KTable<Integer, CustomerWithAddresses> customersWithAddresses = addresses.join( // <5>
+                customers,
+                address -> address.customer_id,
+                AddressAndCustomer::new,
+                Materialized.with(Serdes.Long(), addressAndCustomerSerde)
+            )
+            .groupBy( // <6>
+                (addressId, addressAndCustomer) -> KeyValue.pair(addressAndCustomer.customer.id, addressAndCustomer),
+                Grouped.with(Serdes.Integer(), addressAndCustomerSerde)
+            )
+            .aggregate( // <7>
+                CustomerWithAddresses::new,
+                (customerId, addressAndCustomer, aggregate) -> aggregate.addAddress(addressAndCustomer),
+                (customerId, addressAndCustomer, aggregate) -> aggregate.removeAddress(addressAndCustomer),
+                Materialized.with(Serdes.Integer(), customerWithAddressesSerde)
+            );
+
+        customersWithAddresses.toStream() // <8>
+        .to(
+                customersWithAddressesTopic,
+                Produced.with(Serdes.Integer(), customerWithAddressesSerde)
+        );
+
+        return builder.build();
+    }
+}
+----
+<1> The topic names are injected using the https://microprofile.io/project/eclipse/microprofile-config[MicroProfile Config API], with the values being provided in the Quarkus `application.properties` configuration file.
+<2> Create an instance of `StreamsBuilder`, which is the helper object that lets us build our topology.
+<3> For serializing and deserializing Java types used in the streaming pipeline into/from JSON, Kafka provides the `class io.quarkus.kafka.client.serialization.JsonbSerde`.
+The Serde implementation based on JSON-B.
+<4> KTable-KTable foreign-key join functionality is used to extract the `customer#id` and perform the join.
+`StreamsBuilder#table()` to read a Kafka topic into a KTable i.e. `addresses` and `customers` respectively.
+<5> The message from the `addresses` topic is joined with the corresponding `customers` topic, using the topic’s key; the join result contains the data of the customer with its addresses.
+<6> `groupBy()` operation will have the records to be grouped by `customer#id`.
+<7> The first characteristic of aggregations in Kafka is that all aggregations are computed per key.
+That’s why we must group a KTable prior to the actual aggregation step in Kafka Streams via `groupBy()`.
+The aggregation operation is applied to records of the same key. It is possible to store the aggregation results in a local state store.
+`aggregate()` operation will modify addresses per `customer#id` depending upon the `upsert` or `delete` i.e. `addAddress()` or `removeAddress()` operation.
+<8> The results of the pipeline are written out to the `customersWithAddressesTopic` topic.
+
+The `CustomerWithAddresses` class performs and keeps track of the aggregated values while the events are processed in the streaming pipeline.
+
+[source,java]
+----
+public class CustomerWithAddresses {
+
+    public Customer customer;
+    public List<Address> addresses = new ArrayList<>();
+
+    public CustomerWithAddresses addAddress(AddressAndCustomer addressAndCustomer) {
+        LOGGER.info("Adding: " + addressAndCustomer);
+
+        customer = addressAndCustomer.customer;
+        addresses.add(addressAndCustomer.address);
+
+        return this;
+    }
+
+    public CustomerWithAddresses removeAddress(AddressAndCustomer addressAndCustomer) {
+        LOGGER.info("Removing: " + addressAndCustomer);
+
+        Iterator<Address> it = addresses.iterator();
+        while (it.hasNext()) {
+            Address a = it.next();
+            if (a.id == addressAndCustomer.address.id) {
+                it.remove();
+                break;
+            }
+        }
+
+        return this;
+    }
+}
+----
+
+The Kafka Streams extension is configured via the Quarkus configuration file `application.properties`.
+Along with the topic names, this file also has the information about the Kafka bootstrap server, stream options as follows:
+
+[source,properties]
+----
+customers.topic=dbserver1.inventory.customers
+addresses.topic=dbserver1.inventory.addresses
+customers.with.addresses.topic=customers-with-addresses
+
+quarkus.kafka-streams.bootstrap-servers=localhost:9092
+quarkus.kafka-streams.application-id=kstreams-fkjoin-aggregator
+quarkus.kafka-streams.application-server=${hostname}:8080
+quarkus.kafka-streams.topics=${customers.topic},${addresses.topic}
+
+# streams options
+kafka-streams.cache.max.bytes.buffering=10240
+kafka-streams.commit.interval.ms=1000
+kafka-streams.metadata.max.age.ms=500
+kafka-streams.auto.offset.reset=earliest
+kafka-streams.metrics.recording.level=DEBUG
+kafka-streams.consumer.session.timeout.ms=150
+kafka-streams.consumer.heartbeat.interval.ms=100
+----
+
+== Building and Running the Application
+
+You can now build the aggregator application using:
+----
+mvn clean package -f aggregator/pom.xml
+----
+
+Setup the necessary environment variables:
+----
+export DEBEZIUM_VERSION=1.4
+export QUARKUS_BUILD=jvm
+----
+
+To launch all the containers and building aggregator container images run the https://github.com/debezium/debezium-examples/blob/master/kstreams-fk-join/docker-compose.yaml[docker-compose.yaml] as:
+----
+docker-compose up --build
+----
+
+Configure the Debezium Connector:
+----
+http PUT http://localhost:8083/connectors/inventory-connector/config < register-postgres.json
+----
+
+Now run an instance of the `debezium/tooling` image, attaching to the same network all the other containers run in:
+----
+docker run --tty --rm \
+    --network kstreams-fk-join-network \
+    debezium/tooling:1.1 \
+----
+This image provides several useful tools such as kafkacat. Within the tooling container, run kafkacat to examine the results of the streaming pipeline:
+
+----
+kafkacat -b kafka:9092 -C -o beginning -q \
+    -t customers-with-addresses | jq .
+----
+
+== Running Natively
+Kafka Streams applications can easily be scaled out i.e. the load will be shared amongst multiple instances of the application, each processing just a subset of the partitions of the input topic(s).
+Running Quarkus applications in native code via GraalVM has a very fast start-up time, the applications use significantly less memory when compiled to native code. This allows you to start as many instances of a Kafka Streams pipeline in parallel in a very memory-efficient way.
+If you want to run this application in `native` mode, set the `QUARKUS_MODE` as `native` and run:
+
+----
+mvn clean package -f aggregator/pom.xml -Pnative
+----
+Here is a https://quarkus.io/guides/kafka-streams#running-natively[detailed guide] for you.
+
+== More Insights on Kafka Streams Extension
+This extension can help you address some of the common requirements when building microservices.
+For running your Kafka Streams application in production, you can also add health checks and metrics for the data pipeline.
+
+https://quarkus.io/guides/microprofile-metrics[Metrics] allow applications to gather various metrics and statistics that provide insights into what is happening inside the application.
+Using the MicroProfile Metrics API, these metrics can be exposed via HTTP using JSON format or the OpenMetrics format.
+From there they can be scraped by tools such as Prometheus and stored for analysis and visualization.
+Apart from application-specific metrics, you can utilize built-in metrics exposed by various Quarkus extensions.
+
+On the other hand, we have https://quarkus.io/guides/microprofile-health[MicroProfile Health], which provides information about the liveness of the application i.e. states whether your application is running or not and whether your application is able to process requests.
+
+Along with Kafka Streams https://quarkus.io/guides/kafka-streams#interactive-queries[Interactive Queries], you can directly query the underlying state store of the pipeline for the value associated with a given key.
+By exposing a simple REST endpoint that queries the state store, the latest aggregation result can be retrieved without having to subscribe to any Kafka topic.
+
+== Summary
+The Quarkus extension for Kafka Streams comes with everything needed to run stream processing pipelines on the JVM as well as in Native mode, along with additional bonuses of performing health checks, metrics and interactive queries.
+
+In this article we have discussed stream processing topology of foreign key joins in Kafka Streams and how to use the Quarkus Kafka Streams extension for running and building your application in JVM mode.
+
+You can find the complete https://github.com/debezium/debezium-examples/tree/master/kstreams-fk-join[source code] of the implementation in the Debezium examples repo.
+If you got any questions or feedback, please let us know in the comments below.
+We're looking forward to your suggestions!
+
+_Thanks a lot https://twitter.com/gunnarmorling/[Gunnar Morling] for your feedback while working on this post!_
